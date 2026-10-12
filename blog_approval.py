@@ -28,6 +28,9 @@ STATE = PENDING / "state.json"
 SITE = "https://kdh170117.github.io"
 KST = timezone(timedelta(hours=9))
 EXPIRE_HOURS = 24
+# 2026-10-12 도형님: "글 올린 거 보니 자동화해도 무리 없겠다" → 승인 없이 바로 발행하고 알림만 보낸다.
+# 알림의 [🗑 내리기] 버튼으로 사후에 내릴 수 있다. False 로 바꾸면 기존 승인 흐름으로 돌아간다.
+AUTO_PUBLISH = True
 PYTHON = "/opt/homebrew/bin/python3"
 MARKET_KINDS = ["kr_morning", "kr_close", "us"]          # publish_market.py (stocks_briefing 카드)
 BOARD_KINDS = ["macro_global", "flow_kr"]                # publish_board.py (macro_board 보드)
@@ -121,15 +124,34 @@ def cmd_prepare(date, kind):
     img = f"assets/cards/{pid}.png"
     title = next(l for l in (BLOG / post).read_text().splitlines() if l.startswith("title:"))
     title = title.split(":", 1)[1].strip().strip('"')
-    keyboard = {"inline_keyboard": [[{"text": "✅ 발행", "callback_data": f"ok|{pid}"},
-                                     {"text": "❌ 건너뛰기", "callback_data": f"no|{pid}"}]]}
+    item = {"status": "pending", "post": post, "img": img, "title": title,
+            "message_id": None, "created": time.time()}
+    if AUTO_PUBLISH:
+        try:
+            publish(item)
+        except Exception as exc:
+            item["status"] = "failed"
+            state["items"][pid] = item
+            save_state(state)
+            err(f"[prepare] {pid} 자동 발행 실패: {exc}")
+            tg("sendMessage", data={"chat_id": CHAT_ID, "text": f"⚠️ 블로그 자동 발행 실패 — 로그 확인 필요\n{title}"})
+            return 1
+        item["status"] = "published"
+        state["items"][pid] = item
+        save_state(state)   # 발행 결과를 먼저 저장(알림 실패와 무관하게)
+        caption = f"✅ 블로그 자동 발행 (반영까지 1~2분)\n{title}\n{post_url(Path(post).name)}"
+        keyboard = {"inline_keyboard": [[{"text": "🗑 내리기", "callback_data": f"rm|{pid}"}]]}
+    else:
+        caption = f"[블로그 발행 대기]\n{title}\n\n{EXPIRE_HOURS}시간 내 미응답 시 자동 폐기"
+        keyboard = {"inline_keyboard": [[{"text": "✅ 발행", "callback_data": f"ok|{pid}"},
+                                         {"text": "❌ 건너뛰기", "callback_data": f"no|{pid}"}]]}
     with open(BLOG / img, "rb") as f:
-        msg = tg("sendPhoto", data={"chat_id": CHAT_ID, "caption": f"[블로그 발행 대기]\n{title}\n\n{EXPIRE_HOURS}시간 내 미응답 시 자동 폐기",
+        msg = tg("sendPhoto", data={"chat_id": CHAT_ID, "caption": caption,
                                     "reply_markup": json.dumps(keyboard)}, files={"photo": f}, timeout=60)
-    state["items"][pid] = {"status": "pending", "post": post, "img": img, "title": title,
-                           "message_id": msg["message_id"], "created": time.time()}
+    item["message_id"] = msg["message_id"]
+    state["items"][pid] = item
     save_state(state)
-    log(f"[prepare] {pid} 미리보기 발송 (message_id={msg['message_id']})")
+    log(f"[prepare] {pid} {'자동 발행+알림' if AUTO_PUBLISH else '미리보기 발송'} (message_id={msg['message_id']})")
     return 0
 
 
@@ -143,6 +165,15 @@ def publish(item):
     git("add", item["post"], item["img"])
     if git("status", "--porcelain", "--", item["post"], item["img"]).strip():
         git("commit", "-qm", f"브리핑 발행: {item['title']}")
+    git("push", "-q")
+
+
+def unpublish(item):
+    """발행된 글 내리기(사이트에서 제거). 멱등: 이미 내려간 파일이면 푸시만 다시 한다."""
+    tracked = git("ls-files", "--", item["post"], item["img"]).split()
+    if tracked:
+        git("rm", "-q", "--", *tracked)
+        git("commit", "-qm", f"글 내림: {item['title']}")
     git("push", "-q")
 
 
@@ -179,12 +210,16 @@ def cmd_poll():
             continue
         action, _, pid = cq.get("data", "").partition("|")
         item = state["items"].get(pid)
-        if not item or item["status"] != "pending":
+        expected = "published" if action == "rm" else "pending"
+        if not item or item["status"] != expected:
             answer(cq, "이미 처리된 항목입니다")
             save_state(state)
             continue
         try:
-            if action == "ok":
+            if action == "rm":
+                unpublish(item)
+                item["status"] = "removed"
+            elif action == "ok":
                 publish(item)
                 item["status"] = "published"
             else:
@@ -200,7 +235,11 @@ def cmd_poll():
             continue
         # 결과를 먼저 저장한다: 이후 알림이 실패해도 같은 버튼을 두 번 처리하지 않는다
         save_state(state)
-        if item["status"] == "published":
+        if item["status"] == "removed":
+            answer(cq, "내렸습니다")
+            finish_message(item, "🗑 내림 (사이트 반영까지 1~2분)")
+            log(f"[poll] {pid} 내림")
+        elif item["status"] == "published":
             answer(cq, "발행했습니다")
             finish_message(item, f"✅ 발행됨 (반영까지 1~2분)\n{post_url(Path(item['post']).name)}")
             log(f"[poll] {pid} 발행")
