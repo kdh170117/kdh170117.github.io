@@ -24,3 +24,4 @@ plugins:
   - jekyll-sitemap
 # 검색엔진 소유 확인(공개용 코드)
 naver_site_verification: 0a8952b55be0b1659380041edb4ec6a49969c955
+google_site_verification: scv317Z1cgLwZOwPnWoQNcl_7L_xmlggzBNO7C-SOeU
