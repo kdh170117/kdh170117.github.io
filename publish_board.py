@@ -12,6 +12,7 @@ macro_board 가 이미 만든 out/{global,kr}_YYYY-MM-DD.png 와 data/*_analysis
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -32,11 +33,35 @@ DISCLAIMER = ("※ 시장 전반 정보 정리이며 투자 권유가 아닙니�
               "'자비스 해석'은 데이터 기반 의견입니다. 출처는 보드 하단에 표기했습니다.")
 
 
+TAGS = {
+    "macro_global": ["글로벌 매크로", "미국 금리", "미국증시", "VIX", "달러인덱스", "엔화", "유럽 증시", "금", "유가"],
+    "flow_kr": ["국내 수급", "외국인", "기관", "프로그램 매매", "파생", "ETF", "업종", "VKOSPI"],
+}
+
+
+def build_body(analysis):
+    """보드 분석(JSON) → 본문. 저장본은 숫자 대조에서 탈락한 문장이 이미 빠진 상태(카드와 동일)."""
+    parts = []
+    kpis = analysis.get("kpis", [])
+    if kpis:
+        parts.append("## 핵심 지표\n\n| 지표 | 값 | 참고 |\n|---|---|---|\n" +
+                     "\n".join(f"| {k.get('label','')} | {k.get('value','')} | {k.get('note','')} |" for k in kpis))
+    for sec in analysis.get("sections", []):
+        title = re.sub(r"^[^\w가-힣]+", "", sec.get("title", "")).strip()   # 앞 이모지 제거
+        lines = [f"## {title}" + (f" — {sec['tag']}" if sec.get("tag") else "")]
+        lines += [f"- {pt}" for pt in sec.get("points", [])]
+        if sec.get("view"):
+            lines.append(f"\n> 자비스 해석: {sec['view']}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--date", required=True)
     p.add_argument("--kind", required=True, choices=KINDS)
     p.add_argument("--push", action="store_true", help="커밋+푸시(공개 발행)")
+    p.add_argument("--rewrite", action="store_true", help="이미 있는 글을 같은 원본으로 다시 생성(본문 개편용)")
     a = p.parse_args()
 
     name, category, prefix, hhmm, about = KINDS[a.kind]
@@ -46,11 +71,12 @@ def main():
         print(f"[blog] 보드 산출물 없음: {name} {a.date} (휴장·새 데이터 없음 등) — 발행 생략", file=sys.stderr)
         return 2
     post = BLOG / "_posts" / f"{a.date}-{a.kind.replace('_', '-')}.md"
-    if post.exists():
+    if post.exists() and not a.rewrite:
         print(f"[blog] 이미 있음: {post.name}", file=sys.stderr)
         return 3
 
-    headline = json.loads(src_json.read_text()).get("headline", "").strip()
+    analysis = json.loads(src_json.read_text())
+    headline = analysis.get("headline", "").strip()
     if not headline:
         print(f"[blog] 헤드라인 없음: {src_json.name}", file=sys.stderr)
         return 2
@@ -66,11 +92,14 @@ def main():
         f'title: "{title}"\n'
         f"date: {a.date} {hhmm}:00 +0900\n"
         f"categories: [{category}]\n"
+        f"tags: {json.dumps(TAGS[a.kind], ensure_ascii=False)}\n"
+        f'description: "{headline[:150].replace(chr(34), chr(39))}"\n'
         "---\n"
-        f"{about}\n\n"
+        f"**{headline}**\n\n{about}\n\n"
         f"[![{a.date} {prefix} 보드]({{{{ '/assets/cards/{img.name}' | relative_url }}}})]"
         f"({{{{ '/assets/cards/{img.name}' | relative_url }}}})\n\n"
         "이미지를 누르면 원본 크기로 볼 수 있습니다.\n\n"
+        f"{build_body(analysis)}\n\n"
         f"{DISCLAIMER}\n"
     )
     print(f"[blog] 생성: {post.relative_to(BLOG)}")

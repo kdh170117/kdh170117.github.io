@@ -312,6 +312,8 @@ def main():
         f'title: "[트렌드] 오늘 뜨는 것: {names}"\n'
         f"date: {a.date} 12:30:00 +0900\n"
         "categories: [trend]\n"
+        f"tags: {json.dumps(['트렌드'] + list(dict.fromkeys([c['cat'] for c in items] + [c['term'] for c in items])), ensure_ascii=False)}\n"
+        f'description: "{("오늘 뜨는 것: " + ", ".join(c["term"] for c in items))[:150]}"\n'
         f"scores: {scores}\n"
         "---\n"
         f"{lines}\n\n"

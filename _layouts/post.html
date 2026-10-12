@@ -1,0 +1,47 @@
+---
+layout: default
+---
+{%- comment -%} minima 2.5.1 post 레이아웃 + 태그 + 조회수(GoatCounter 공개 카운터) {%- endcomment -%}
+<article class="post h-entry" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    <h1 class="post-title p-name" itemprop="name headline">{{ page.title | escape }}</h1>
+    <p class="post-meta">
+      <time class="dt-published" datetime="{{ page.date | date_to_xmlschema }}" itemprop="datePublished">
+        {{ page.date | date: "%Y-%m-%d %H:%M" }}
+      </time>
+      {%- if site.goatcounter_code %} · <span class="view-count" data-path="{{ page.url | remove_last: '/' }}">조회 -</span>{%- endif -%}
+    </p>
+    {%- if page.tags.size > 0 %}
+    <p class="post-tags">
+      {%- for tag in page.tags %}<a class="tag" href="{{ '/tags/' | relative_url }}#{{ tag | slugify }}">#{{ tag }}</a>{% endfor -%}
+    </p>
+    {%- endif %}
+  </header>
+
+  <div class="post-content e-content" itemprop="articleBody">
+    {{ content }}
+  </div>
+
+  <a class="u-url" href="{{ page.url | relative_url }}" hidden></a>
+</article>
+<style>
+.post-tags{margin:.4em 0 0}
+.post-tags .tag{display:inline-block;font-size:.85rem;margin:0 .45em .35em 0;padding:.1em .55em;border-radius:999px;background:#f0f0f0;color:#555;text-decoration:none}
+.post-tags .tag:hover{background:#e2e2e2}
+.post-content table{font-size:.9rem}
+</style>
+{%- if site.goatcounter_code %}
+<script>
+// 공개 카운터(설정 'Allow adding visitor counts' 필요). 실패하면 조회수 표시만 숨긴다.
+(function () {
+  var el = document.querySelector('.view-count');
+  if (!el) return;
+  var path = el.getAttribute('data-path') || location.pathname.replace(/\/$/, '');
+  fetch('https://{{ site.goatcounter_code }}.goatcounter.com/counter/' + encodeURIComponent(path) + '.json')
+    .then(function (r) { return r.status === 404 ? { count: '0' } : (r.ok ? r.json() : Promise.reject(r.status)); })
+    .then(function (d) { el.textContent = '조회 ' + d.count; })
+    .catch(function () { el.style.display = 'none'; });
+})();
+</script>
+{%- endif %}

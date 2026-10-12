@@ -9,6 +9,7 @@ permalink: /posts/:year/:month/:day/:title/
 header_pages:
   - category/market.md
   - category/trend.md
+  - tags.md
 exclude:
   - publish_market.py
   - publish_board.py
