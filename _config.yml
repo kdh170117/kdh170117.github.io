@@ -15,6 +15,7 @@ exclude:
   - publish_trend.py
   - _llm_claude.py
   - blog_approval.py
+  - blog_stats.py
   - launchd
   - README.md
   - __pycache__
