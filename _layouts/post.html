@@ -10,7 +10,7 @@ layout: default
       <time class="dt-published" datetime="{{ page.date | date_to_xmlschema }}" itemprop="datePublished">
         {{ page.date | date: "%Y-%m-%d %H:%M" }}
       </time>
-      {%- if site.goatcounter_code %} · <span class="view-count" data-path="{{ page.url | remove_last: '/' }}">조회 -</span>{%- endif -%}
+      {%- if site.goatcounter_code %}<span class="view-count" data-path="{{ page.url | remove_last: '/' }}"></span>{%- endif -%}
     </p>
     {%- if page.tags.size > 0 %}
     <p class="post-tags">
@@ -40,7 +40,7 @@ layout: default
   var path = el.getAttribute('data-path') || location.pathname.replace(/\/$/, '');
   fetch('https://{{ site.goatcounter_code }}.goatcounter.com/counter/' + encodeURIComponent(path) + '.json')
     .then(function (r) { return r.status === 404 ? { count: '0' } : (r.ok ? r.json() : Promise.reject(r.status)); })
-    .then(function (d) { el.textContent = '조회 ' + d.count; })
+    .then(function (d) { el.textContent = ' · 조회 ' + d.count; })
     .catch(function () { el.style.display = 'none'; });
 })();
 </script>
