@@ -1,0 +1,24 @@
+title: Dbro 데일리 브리핑
+url: https://kdh170117.github.io
+author: Dbro
+description: 시장 전반 브리핑과 오늘의 트렌드
+theme: minima
+lang: ko
+timezone: Asia/Seoul
+permalink: /posts/:year/:month/:day/:title/
+header_pages:
+  - category/market.md
+  - category/trend.md
+exclude:
+  - publish_market.py
+  - publish_board.py
+  - publish_trend.py
+  - _llm_claude.py
+  - blog_approval.py
+  - launchd
+  - README.md
+  - __pycache__
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
+  - jekyll-sitemap

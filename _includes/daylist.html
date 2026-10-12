@@ -1,0 +1,23 @@
+{%- comment -%} 날짜별 묶음(최신 날짜 먼저) · 하루 안에서도 최신 시각 먼저 {%- endcomment -%}
+{%- assign weekdays = "일,월,화,수,목,금,토" | split: "," -%}
+{%- assign days = include.posts | group_by_exp: "p", "p.date | date: '%Y-%m-%d'" -%}
+{%- if days.size == 0 -%}<p>아직 글이 없습니다.</p>{%- endif -%}
+{%- for day in days -%}
+  {%- assign first = day.items | first -%}
+  {%- assign wd = first.date | date: "%w" | plus: 0 -%}
+  <h2 class="day-head">{{ day.name }} ({{ weekdays[wd] }})</h2>
+  <ul class="day-list">
+  {%- assign items = day.items | sort: "date" | reverse -%}
+  {%- for post in items -%}
+    <li><span class="day-time">{{ post.date | date: "%H:%M" }}</span>
+      <a class="post-link" href="{{ post.url | relative_url }}">{{ post.title | escape }}</a></li>
+  {%- endfor -%}
+  </ul>
+{%- endfor -%}
+<style>
+.day-head{font-size:1.1rem;margin:1.6em 0 .5em;padding-bottom:.3em;border-bottom:1px solid #e8e8e8}
+.day-list{list-style:none;margin:0}
+.day-list li{display:flex;gap:.8em;align-items:baseline;padding:.35em 0}
+.day-time{font-variant-numeric:tabular-nums;color:#828282;min-width:3.2em;font-size:.9rem}
+.day-list .post-link{font-size:1rem}
+</style>

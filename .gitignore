@@ -1,0 +1,6 @@
+.env
+.pending/
+logs/
+__pycache__/
+_site/
+launchd/

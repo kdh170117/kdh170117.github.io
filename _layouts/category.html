@@ -1,0 +1,6 @@
+---
+layout: page
+---
+{{ content }}
+{% assign cat_posts = site.categories[page.category] | default: empty %}
+{% include daylist.html posts=cat_posts %}
