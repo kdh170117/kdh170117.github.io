@@ -31,6 +31,12 @@ EXPIRE_HOURS = 24
 # 2026-10-12 도형님: "글 올린 거 보니 자동화해도 무리 없겠다" → 승인 없이 바로 발행하고 알림만 보낸다.
 # 알림의 [🗑 내리기] 버튼으로 사후에 내릴 수 있다. False 로 바꾸면 기존 승인 흐름으로 돌아간다.
 AUTO_PUBLISH = True
+
+# IndexNow(2026-10-12): 발행·내림 후 검색엔진에 즉시 알린다. 네이버는 공식 참여 엔진(indexnow.org/searchengines.json).
+# 키는 사이트 루트 {key}.txt 로 공개되는 값이라 비밀이 아니다. Pages 반영(1~2분) 뒤에 보내야 엔진이 확인할 수 있다.
+INDEXNOW_KEY = "9f6c1f844b446af94892b589fd28f06b"
+INDEXNOW_ENDPOINTS = ["https://searchadvisor.naver.com/indexnow", "https://api.indexnow.org/indexnow"]
+INDEXNOW_DELAY = 180
 PYTHON = "/opt/homebrew/bin/python3"
 MARKET_KINDS = ["kr_morning", "kr_close", "us"]          # publish_market.py (stocks_briefing 카드)
 BOARD_KINDS = ["macro_global", "flow_kr"]                # publish_board.py (macro_board 보드)
@@ -137,6 +143,7 @@ def cmd_prepare(date, kind):
             tg("sendMessage", data={"chat_id": CHAT_ID, "text": f"⚠️ 블로그 자동 발행 실패 — 로그 확인 필요\n{title}"})
             return 1
         item["status"] = "published"
+        item.update(indexnow="due", changed=time.time())
         state["items"][pid] = item
         save_state(state)   # 발행 결과를 먼저 저장(알림 실패와 무관하게)
         caption = f"✅ 블로그 자동 발행 (반영까지 1~2분)\n{title}\n{post_url(Path(post).name)}"
@@ -175,6 +182,39 @@ def unpublish(item):
         git("rm", "-q", "--", *tracked)
         git("commit", "-qm", f"글 내림: {item['title']}")
     git("push", "-q")
+
+
+def indexnow(urls):
+    """URL 목록을 IndexNow 로 알린다. 반환: {엔드포인트: HTTP 상태}. 실패는 기록만 한다(발행과 무관)."""
+    body = json.dumps({"host": SITE.removeprefix("https://"), "key": INDEXNOW_KEY,
+                       "keyLocation": f"{SITE}/{INDEXNOW_KEY}.txt", "urlList": urls})
+    result = {}
+    for ep in INDEXNOW_ENDPOINTS:
+        try:
+            r = requests.post(ep, data=body, timeout=20,
+                              headers={"Content-Type": "application/json; charset=utf-8"})
+            result[ep] = r.status_code
+        except requests.RequestException as exc:
+            result[ep] = type(exc).__name__
+    return result
+
+
+def flush_indexnow(state):
+    """발행·내림 후 INDEXNOW_DELAY 가 지났고 사이트 반영이 확인된 항목을 알린다(poll 이 매분 부른다)."""
+    now = time.time()
+    for pid, item in state["items"].items():
+        if item.get("indexnow") != "due" or now - item.get("changed", 0) < INDEXNOW_DELAY:
+            continue
+        url = post_url(Path(item["post"]).name)
+        try:
+            live = requests.get(url, timeout=15).status_code
+        except requests.RequestException:
+            continue
+        if (item["status"] == "published") != (live == 200):
+            continue                                   # 아직 Pages 반영 전 — 다음 분에 다시
+        res = indexnow([url, f"{SITE}/", f"{SITE}/category/market/", f"{SITE}/category/trend/"])
+        item["indexnow"] = res
+        log(f"[indexnow] {pid} {item['status']} → {res}")
 
 
 def answer(cq, text):
@@ -219,9 +259,11 @@ def cmd_poll():
             if action == "rm":
                 unpublish(item)
                 item["status"] = "removed"
+                item.update(indexnow="due", changed=time.time())
             elif action == "ok":
                 publish(item)
                 item["status"] = "published"
+                item.update(indexnow="due", changed=time.time())
             else:
                 discard(item)
                 item["status"] = "skipped"
@@ -247,6 +289,8 @@ def cmd_poll():
             answer(cq, "건너뛰었습니다")
             finish_message(item, "❌ 건너뜀")
             log(f"[poll] {pid} 건너뜀")
+    flush_indexnow(state)
+    save_state(state)
     # 만료 처리
     now = time.time()
     for pid, item in state["items"].items():

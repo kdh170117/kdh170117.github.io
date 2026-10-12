@@ -54,7 +54,7 @@ CATEGORIES = {
     "소비·생활": ("#8a6d3b", ["품절 대란", "오픈런", "팝업스토어"]),
     "밈·유행어": ("#d1495b", ["유행어", "밈 뜻", "챌린지 유행"]),
 }
-TOP_N, MIN_N, PER_CATEGORY = 5, 3, 2
+TOP_N, MIN_N, PER_CATEGORY = 3, 3, 1   # 2026-10-12 도형님: TOP 3 로 간략하게
 COLLECT_DAYS = 2
 MIN_BLOG_14D = 5          # 블로그 최근 14일 언급이 이보다 적으면 '화제' 근거 부족
 MIN_SURGE = 1.3           # 최근 3일 검색이 이전 2주 평균보다 30% 이상 높아야 '뜨는 중'
@@ -76,14 +76,20 @@ EXTRACT_SYSTEM = """너는 한국 트렌드 편집자다. 입력은 분야별 �
 - 근거 글 번호(evidence)를 1개 이상 단다.
 출력은 JSON 하나만: {"candidates":[{"category":"분야명","term":"","evidence":[번호]}]}"""
 
-WRITE_SYSTEM = """너는 트렌드 카드 작가다. 입력은 키워드별로 모은 최근 글 요약이다.
-각 키워드에 대해 why(왜 요즘 뜨는지, 40자 이내)를 **새 문장으로** 써라(입력 문장 베끼기 금지).
-category 는 키워드의 실제 성격으로 다시 판정한다 — 반드시 아래 목록 중 하나, 맞는 게 없으면 "제외".
-분야 목록: 뷰티, 아이돌·연예, 푸드, 패션, 테크·IT, 소비·생활, 밈·유행어 (의약품·의료는 "제외")
-- 입력 글로 확인되는 사실만. 날짜·수치·인물·출처를 지어내지 않는다.
-- 논란·루머·사생활·사건사고는 언급하지 않는다. 가볍고 정보 위주로.
-- 명사형 또는 '~해서 화제' 같은 짧은 종결.
-출력은 JSON 하나만: {"items":[{"term":"","category":"","why":""}]}"""
+WRITE_SYSTEM = """너는 트렌드 해설 카드 작가다. 입력은 키워드별로 모은 최근 뉴스·블로그 요약이다.
+처음 듣는 사람도 '그게 뭔데?'가 풀리게, 각 키워드를 아래 형식으로 **새 문장으로** 정리하라(입력 문장 베끼기 금지).
+- category: 키워드의 실제 성격으로 다시 판정. 반드시 목록 중 하나, 맞는 게 없으면 "제외".
+  목록: 뷰티, 아이돌·연예, 푸드, 패션, 테크·IT, 소비·생활, 밈·유행어 (의약품·의료는 "제외")
+- emoji: 키워드를 나타내는 이모지 1개
+- headline: 한 줄 정의(무엇인지), 30자 이내. 예) "쿠팡이 1년에 2번 여는 가전·디지털 할인 행사"
+- facts: 핵심 정보 2~4개. label 은 무엇/언제/어디/얼마/누가/특징 중 하나, text 는 40자 이내.
+  입력에 있는 사실만. 날짜·가격·수량·인원 등 숫자는 입력에 그대로 있는 것만 쓴다. 모르면 그 항목을 빼라.
+- why: 왜 지금 뜨는지, 40자 이내.
+규칙: 논란·루머·사생활·사건사고·부고는 언급하지 않는다. 광고 문구처럼 쓰지 않는다. 담백하고 정보 위주.
+- 참여 업체 한 곳의 정보(그 브랜드의 할인 기간·가격)를 행사·제품 전체의 정보처럼 쓰지 않는다.
+  여러 글에 공통으로 나오는 사실을 우선하고, 글마다 다르면 그 항목은 뺀다.
+출력은 JSON 하나만:
+{"items":[{"term":"","category":"","emoji":"","headline":"","facts":[{"label":"","text":""}],"why":""}]}"""
 
 
 def log(msg):
@@ -190,21 +196,56 @@ def select(cands, recent):
     return picked
 
 
+def gather_sources(c):
+    """선정된 키워드의 설명 재료: 뉴스(정확도순) + 블로그(최신순). 키워드가 실제로 들어간 글만."""
+    texts = []
+    for kind, sort, n in (("news", "sim", 10), ("blog", "date", 6)):
+        for it in search_docs(kind, f'"{c["term"]}"', display=20, sort=sort).get("items", []):
+            t = strip(it["title"]) + " — " + strip(it.get("description"))[:220]
+            if c["term"] in t and not SENSITIVE.search(t) and t not in texts:
+                texts.append(t)
+            if sum(1 for x in texts if x) >= n + (10 if kind == "blog" else 0):
+                break
+    c["sources"] = texts[:16]
+    return c
+
+
+NUM = re.compile(r"\d[\d,.]*")
+
+
+def numbers_ok(text, source):
+    """문장 속 숫자가 모두 원문에 있어야 한다(날짜·가격·수량 지어내기 차단)."""
+    src = source.replace(",", "")
+    return all(n.replace(",", "").rstrip(".") in src for n in NUM.findall(text))
+
+
 def write(picks):
-    body = "\n\n".join(f"[{c['term']}] ({c['cat']})\n" + "\n".join(c["snips"]) for c in picks)
-    items = parse_json(_llm_claude.call(body, system=WRITE_SYSTEM, model=MODEL, timeout=240))["items"]
+    body = "\n\n".join(f"[{c['term']}] (수집 분야: {c['cat']})\n" + "\n".join(c["sources"]) for c in picks)
+    items = parse_json(_llm_claude.call(body, system=WRITE_SYSTEM, model=MODEL, timeout=300))["items"]
     by_term = {i.get("term"): i for i in items}
     out = []
     for p in picks:
         it = by_term.get(p["term"], {})
-        why, cat = it.get("why", "").strip(), it.get("category", "").strip()
+        cat, head, why = it.get("category", "").strip(), it.get("headline", "").strip(), it.get("why", "").strip()
+        src = " ".join(p["sources"])
         if cat not in CATEGORIES:
             log(f"분야 재판정 제외: {p['term']} ({cat!r})")
             continue
-        if not why or len(why) > 50 or BANNED.search(why) or SENSITIVE.search(why):
-            log(f"작성 검사 탈락: {p['term']} ({why[:30]!r})")
+        facts = []
+        for f in it.get("facts", [])[:4]:
+            label, text = f.get("label", "").strip(), f.get("text", "").strip()
+            if label and text and len(text) <= 50 and numbers_ok(text, src) \
+                    and not BANNED.search(text) and not SENSITIVE.search(text):
+                facts.append({"label": label, "text": text})
+            else:
+                log(f"사실 항목 제외: {p['term']} / {label}: {text[:30]!r}")
+        checks = [head, why]
+        if not head or not why or len(head) > 40 or len(why) > 50 or not facts \
+                or any(BANNED.search(x) or SENSITIVE.search(x) or not numbers_ok(x, src) for x in checks):
+            log(f"작성 검사 탈락: {p['term']} ({head[:20]!r} / {why[:20]!r} / facts {len(facts)})")
             continue
-        out.append({**p, "cat": cat, "why": why})
+        out.append({**p, "cat": cat, "emoji": (it.get("emoji") or "✨").strip()[:2],
+                    "headline": head, "facts": facts, "why": why})
     return out
 
 
@@ -212,40 +253,48 @@ def surge_label(s):
     return "새로 등장" if s >= 99 else f"검색 ×{s:.1f}"   # 99 = 이전 2주 검색 0
 
 
-CARD_CSS = """
+BASE_CSS = """
 body{margin:0;width:1080px;background:#f6f4ef;font-family:"Apple SD Gothic Neo",sans-serif;color:#1f1d1a}
-.wrap{padding:56px 56px 40px}
-.top{display:flex;justify-content:space-between;align-items:baseline;color:#1f1d1a;font-weight:800;font-size:26px}
+.wrap{padding:56px 56px 44px}
+.top{display:flex;justify-content:space-between;align-items:baseline;font-weight:800;font-size:26px}
 .top span{color:#8c8578;font-weight:600;font-size:22px}
+.chip{display:inline-block;color:#fff;font-size:22px;font-weight:800;border-radius:999px;padding:5px 16px}
+.surge{font-size:22px;font-weight:800;color:#d1495b}
+.foot{font-size:19px;color:#a39c8f;margin-top:22px;line-height:1.5}
+"""
+
+COVER_CSS = BASE_CSS + """
 h1{font-size:60px;line-height:1.15;margin:22px 0 8px;font-weight:900}
 h1 em{font-style:normal;color:#d1495b}
 .sub{font-size:24px;color:#8c8578;margin-bottom:30px}
-.row{display:flex;gap:24px;align-items:flex-start;background:#fff;border-radius:24px;padding:28px 32px;margin-bottom:18px}
-.rank{font-size:52px;font-weight:900;color:#d1495b;min-width:44px;line-height:1}
+.row{display:flex;gap:22px;align-items:center;background:#fff;border-radius:24px;padding:24px 30px;margin-bottom:16px}
+.rank{font-size:48px;font-weight:900;color:#d1495b;min-width:40px}
+.emo{font-size:56px}
 .body{flex:1}
-.meta{display:flex;align-items:center;gap:12px;margin-bottom:8px}
-.chip{color:#fff;font-size:20px;font-weight:800;border-radius:999px;padding:4px 14px}
-.surge{margin-left:auto;font-size:21px;font-weight:800;color:#d1495b}
-.term{font-size:40px;font-weight:900;margin-bottom:6px}
-.why{font-size:26px;color:#4a453e}
-.foot{font-size:19px;color:#a39c8f;margin-top:16px;line-height:1.5}
+.meta{display:flex;gap:12px;align-items:center;margin-bottom:6px}
+.meta .surge{margin-left:auto}
+.term{font-size:38px;font-weight:900}
+.head{font-size:25px;color:#4a453e;margin-top:4px}
+"""
+
+DETAIL_CSS = BASE_CSS + """
+.hero{border-radius:32px;padding:44px 48px;color:#fff;margin:26px 0 26px;position:relative;overflow:hidden}
+.hero .emo{position:absolute;right:40px;top:30px;font-size:150px;opacity:.95}
+.hero .rank{font-size:30px;font-weight:900;opacity:.85}
+.hero .term{font-size:72px;font-weight:900;line-height:1.1;margin:10px 0 14px;max-width:760px}
+.hero .chip{background:rgba(255,255,255,.25)}
+.hero .surge{color:#fff;margin-left:12px}
+.def{font-size:36px;font-weight:800;line-height:1.35;margin:0 0 26px}
+.facts{background:#fff;border-radius:26px;padding:12px 34px}
+.fact{display:flex;gap:22px;padding:20px 0;border-bottom:1px solid #eee;font-size:29px;line-height:1.4}
+.fact:last-child{border-bottom:0}
+.fact b{min-width:76px;color:#8c8578;font-weight:800}
+.why{margin-top:22px;background:#fff3d6;border-radius:22px;padding:24px 30px;font-size:28px;line-height:1.4}
+.why b{color:#b4541a}
 """
 
 
-def render(items, today, png_path):
-    rows = "".join(
-        f'<div class="row"><div class="rank">{i}</div><div class="body"><div class="meta">'
-        f'<span class="chip" style="background:{CATEGORIES[c["cat"]][0]}">{html.escape(c["cat"])}</span>'
-        f'<span class="surge">{surge_label(c["surge"])}</span></div>'
-        f'<div class="term">{html.escape(c["term"])}</div><div class="why">{html.escape(c["why"])}</div></div></div>'
-        for i, c in enumerate(items, 1))
-    basis = today - timedelta(days=1)
-    doc = (f'<!doctype html><html lang="ko"><head><meta charset="utf-8"><style>{CARD_CSS}</style></head><body><div class="wrap">'
-           f'<div class="top">Dbro / 오늘의 트렌드<span>{today:%Y-%m-%d}</span></div>'
-           f'<h1>지금 <em>뜨는 것</em> TOP {len(items)}</h1>'
-           f'<div class="sub">분야 상관없이 네이버 검색이 가장 크게 늘어난 순 · {basis:%m/%d} 검색 기준</div>'
-           f'{rows}<div class="foot">검색 ×N = 최근 3일 네이버 검색량 ÷ 직전 2주 평균 (네이버 검색어 트렌드 상대값, 어제까지 반영)<br>'
-           f'설명은 최근 뉴스·블로그 글을 바탕으로 정리했습니다.</div></div></body></html>')
+def shoot(doc, png_path):
     src = png_path.with_suffix(".html")
     raw = png_path.with_name(png_path.stem + "_raw.png")
     src.write_text(doc, encoding="utf-8")
@@ -257,9 +306,55 @@ def render(items, today, png_path):
     y = h - 1
     while y > 0 and all(sum(abs(p - q) for p, q in zip(px[x, y], bg)) < 12 for x in range(0, w, 4)):
         y -= 1
-    im.crop((0, 0, w, min(h, y + 40))).save(png_path)
+    im.crop((0, 0, w, min(h, y + 44))).save(png_path)
     raw.unlink(missing_ok=True)
     src.unlink(missing_ok=True)
+
+
+def page(css, inner):
+    return (f'<!doctype html><html lang="ko"><head><meta charset="utf-8"><style>{css}</style></head>'
+            f'<body><div class="wrap">{inner}</div></body></html>')
+
+
+def render_cover(items, today, png_path):
+    esc = html.escape
+    rows = "".join(
+        f'<div class="row"><div class="rank">{i}</div><div class="emo">{esc(c["emoji"])}</div><div class="body">'
+        f'<div class="meta"><span class="chip" style="background:{CATEGORIES[c["cat"]][0]}">{esc(c["cat"])}</span>'
+        f'<span class="surge">{surge_label(c["surge"])}</span></div>'
+        f'<div class="term">{esc(c["term"])}</div><div class="head">{esc(c["headline"])}</div></div></div>'
+        for i, c in enumerate(items, 1))
+    basis = today - timedelta(days=1)
+    shoot(page(COVER_CSS,
+               f'<div class="top">Dbro / 오늘의 트렌드<span>{today:%Y-%m-%d}</span></div>'
+               f'<h1>지금 <em>뜨는 것</em> TOP {len(items)}</h1>'
+               f'<div class="sub">분야 상관없이 네이버 검색이 가장 크게 늘어난 순 · {basis:%m/%d} 검색 기준</div>{rows}'
+               f'<div class="foot">검색 ×N = 최근 3일 네이버 검색량 ÷ 직전 2주 평균 (네이버 검색어 트렌드 상대값)<br>'
+               f'항목별 자세한 설명은 다음 카드에 있습니다.</div>'), png_path)
+
+
+def render_detail(c, rank, today, png_path):
+    esc = html.escape
+    color = CATEGORIES[c["cat"]][0]
+    facts = "".join(f'<div class="fact"><b>{esc(f["label"])}</b><span>{esc(f["text"])}</span></div>' for f in c["facts"])
+    shoot(page(DETAIL_CSS,
+               f'<div class="top">Dbro / 오늘의 트렌드<span>{today:%Y-%m-%d}</span></div>'
+               f'<div class="hero" style="background:{color}"><div class="emo">{esc(c["emoji"])}</div>'
+               f'<div class="rank">TOP {rank}</div><div class="term">{esc(c["term"])}</div>'
+               f'<span class="chip">{esc(c["cat"])}</span><span class="surge">{surge_label(c["surge"])}</span></div>'
+               f'<div class="def">{esc(c["headline"])}</div><div class="facts">{facts}</div>'
+               f'<div class="why"><b>왜 뜨나</b> · {esc(c["why"])}</div>'
+               f'<div class="foot">최근 네이버 뉴스·블로그 글을 바탕으로 정리 · 검색 ×N = 최근 3일 ÷ 직전 2주 평균</div>'), png_path)
+
+
+def existing_picks(post):
+    """--rewrite: 이미 발행된 글의 선정 키워드·분야·급증비를 그대로 다시 쓴다(선정 결과가 바뀌지 않게)."""
+    text = post.read_text()
+    scores = json.loads(re.search(r"^scores: (\{.*\})$", text, re.M).group(1))
+    m = re.search(r"^picks: (\[.*\])$", text, re.M)
+    cats = dict(json.loads(m.group(1))) if m else dict(
+        (t, c) for t, c in re.findall(r"^\d\. \*\*(.+?)\*\* \((.+?),", text, re.M))   # 구 형식 본문
+    return [{"term": t, "cat": cats.get(t, "소비·생활"), "surge": s, "blog14": 0} for t, s in scores.items()]
 
 
 def main():
@@ -267,30 +362,35 @@ def main():
     ap.add_argument("--date", default=date.today().isoformat())
     ap.add_argument("--kind", default="trend", choices=["trend"])   # blog_approval 호환
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--rewrite", action="store_true", help="이미 있는 글을 같은 키워드로 다시 작성(형식 개편용)")
     a = ap.parse_args()
     today = date.fromisoformat(a.date)
 
     post = BLOG / "_posts" / f"{a.date}-trend.md"
-    if post.exists():
+    if post.exists() and not a.rewrite:
         log(f"이미 있음: {post.name}")
         return 3
     try:
-        docs = collect(today)
-        log(f"수집 {len(docs)}건 ({', '.join(f'{k} {sum(d["cat"] == k for d in docs)}' for k in CATEGORIES)})")
-        cands = verify(extract(docs), today)
+        if a.rewrite:
+            picks = existing_picks(post)
+        else:
+            docs = collect(today)
+            log(f"수집 {len(docs)}건 ({', '.join(f'{k} {sum(d["cat"] == k for d in docs)}' for k in CATEGORIES)})")
+            cands = verify(extract(docs), today)
+            picks = select(cands, recent_scores(today))
+            for c in sorted(cands, key=lambda c: -c["surge"]):
+                log(f"  {'선정' if c in picks else '    '} [{c['cat']}] {c['term']}: ×{c['surge']} · 블로그14일 {c['blog14']}")
+        if a.dry_run:
+            return 0
+        if len(picks) < MIN_N:
+            log(f"선정 {len(picks)}개 < {MIN_N} — 발행 생략")
+            return 2
+        picks = [gather_sources(c) for c in picks[:TOP_N + 2]]
     except Exception as exc:
         log(f"수집·검증 실패: {type(exc).__name__}: {exc}")
         return 1
-    picks = select(cands, recent_scores(today))
-    for c in sorted(cands, key=lambda c: -c["surge"]):
-        log(f"  {'선정' if c in picks else '    '} [{c['cat']}] {c['term']}: ×{c['surge']} · 블로그14일 {c['blog14']}")
-    if a.dry_run:
-        return 0
-    if len(picks) < MIN_N:
-        log(f"선정 {len(picks)}개 < {MIN_N} — 발행 생략")
-        return 2
     try:
-        items = write(picks[:TOP_N + 2])[:TOP_N]
+        items = write(picks)[:TOP_N]
     except Exception as exc:
         log(f"작성 실패: {type(exc).__name__}: {exc}")
         return 1
@@ -298,13 +398,27 @@ def main():
         log(f"작성 통과 {len(items)}개 < {MIN_N} — 발행 생략")
         return 2
 
-    img = BLOG / "assets" / "cards" / f"{a.date}_trend.png"
-    img.parent.mkdir(parents=True, exist_ok=True)
-    render(items, today, img)
+    cards = BLOG / "assets" / "cards"
+    cards.mkdir(parents=True, exist_ok=True)
+    cover = cards / f"{a.date}_trend.png"            # 텔레그램 알림·글 첫 이미지
+    render_cover(items, today, cover)
+    for old in cards.glob(f"{a.date}_trend_*.png"):   # --rewrite 때 이전 상세 카드 정리
+        old.unlink()
+    url = lambda name: f"{{{{ '/assets/cards/{name}' | relative_url }}}}"
+    sections = []
+    for i, c in enumerate(items, 1):
+        img = cards / f"{a.date}_trend_{i}.png"
+        render_detail(c, i, today, img)
+        facts = "\n".join(f"- **{f['label']}** {f['text']}" for f in c["facts"])
+        sections.append(f"## {i}. {c['emoji']} {c['term']}\n\n"
+                        f"*{c['cat']} · {surge_label(c['surge'])}*\n\n"
+                        f"**{c['headline']}**\n\n{facts}\n\n> 왜 뜨나: {c['why']}\n\n"
+                        f"![{c['term']} 설명 카드]({url(img.name)})")
     names = " · ".join(c["term"] for c in items[:3])
-    lines = "\n".join(f"{i}. **{c['term']}** ({c['cat']}, {surge_label(c['surge'])}) — {c['why']}"
-                      for i, c in enumerate(items, 1))
     scores = json.dumps({c["term"]: c["surge"] for c in items}, ensure_ascii=False)
+    picks_fm = json.dumps([[c["term"], c["cat"]] for c in items], ensure_ascii=False)
+    tags = ["트렌드"] + list(dict.fromkeys([c["cat"] for c in items] + [c["term"] for c in items]))
+    desc = " / ".join(f"{c['term']}: {c['headline']}" for c in items)[:150].replace('"', "'")
     post.parent.mkdir(exist_ok=True)
     post.write_text(
         "---\n"
@@ -312,13 +426,14 @@ def main():
         f'title: "[트렌드] 오늘 뜨는 것: {names}"\n'
         f"date: {a.date} 12:30:00 +0900\n"
         "categories: [trend]\n"
-        f"tags: {json.dumps(['트렌드'] + list(dict.fromkeys([c['cat'] for c in items] + [c['term'] for c in items])), ensure_ascii=False)}\n"
-        f'description: "{("오늘 뜨는 것: " + ", ".join(c["term"] for c in items))[:150]}"\n'
+        f"tags: {json.dumps(tags, ensure_ascii=False)}\n"
+        f'description: "{desc}"\n'
         f"scores: {scores}\n"
+        f"picks: {picks_fm}\n"
         "---\n"
-        f"{lines}\n\n"
-        f"![{a.date} 오늘의 트렌드 카드]({{{{ '/assets/cards/{img.name}' | relative_url }}}})\n\n"
-        "※ 네이버 검색어 트렌드(상대값, 어제까지)와 최근 뉴스·블로그 글을 바탕으로 정리했습니다.\n"
+        f"![{a.date} 오늘의 트렌드 TOP {len(items)}]({url(cover.name)})\n\n"
+        + "\n\n".join(sections) +
+        "\n\n※ 네이버 검색어 트렌드(상대값, 어제까지)와 최근 뉴스·블로그 글을 바탕으로 정리했습니다.\n"
     )
     print(f"[blog] 생성: {post.relative_to(BLOG)}")
     return 0
