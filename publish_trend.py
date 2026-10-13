@@ -59,8 +59,10 @@ TOP_N, MIN_N, PER_CATEGORY = 3, 3, 1   # 2026-10-12 도형님: TOP 3 로 간략�
 COLLECT_DAYS = 2
 MIN_BLOG_14D = 5          # 블로그 최근 14일 언급이 이보다 적으면 '화제' 근거 부족
 MIN_SURGE = 1.3           # 최근 3일 검색이 이전 2주 평균보다 30% 이상 높아야 '뜨는 중'
-REPEAT_DAYS = 7
-REPEAT_SURGE_FACTOR = 2.0
+# 2026-10-13 도형님: "언급된 건 제외하고 다음 순으로" → 한 번 실은 키워드는 예외 없이 30일 제외.
+# (구 규칙: 7일 내라도 급증비가 그때의 2배면 재등장 허용 → 쿠가세·I SPY 가 이틀 연속 실렸다)
+REPEAT_DAYS = 30
+HOT_N = 2                 # '여전히 화제' — 이미 소개했지만 오늘도 기준을 넘은 키워드(한 줄 근황만)
 
 # 공개 글에 싣지 않는 것 — 프롬프트로 막고, 결과도 기계 검사한다.
 BANNED = re.compile(r"한남|한녀|김치녀|틀딱|급식충|맘충|짱깨|쪽바리|흑형|장애|성기|섹스|자살|일베|메갈|좌좀|수꼴|대깨")
@@ -86,6 +88,8 @@ WRITE_SYSTEM = """너는 트렌드 해설 카드 작가다. 입력은 키워드�
 - facts: 핵심 정보 2~4개. label 은 무엇/언제/어디/얼마/누가/특징 중 하나, text 는 40자 이내.
   입력에 있는 사실만. 날짜·가격·수량·인원 등 숫자는 입력에 그대로 있는 것만 쓴다. 모르면 그 항목을 빼라.
 - why: 왜 지금 뜨는지, 40자 이내.
+- 키워드 머리에 (여전히 화제) 표시가 있으면 이미 소개했던 것이다: headline 과 why(=지금 근황, 새로 바뀐 점 위주)만 쓰고
+  facts 는 빈 배열, scene 은 빈 문자열로 둔다.
 - scene: 대표 이미지로 쓸 '일반적인 장면' 묘사, 한국어 60자 이내. 실존 인물·아이돌·브랜드·로고·실제 상품명·글자 금지.
   예) 할인 행사 → "밝은 매장에 냉장고·TV·노트북이 진열된 장면", 아이돌 신곡 → "보라색 조명이 비치는 빈 콘서트 무대",
       디저트 → "나무 쟁반 위 알록달록한 찹쌀떡 클로즈업", 게임 → "판타지 마을 풍경 일러스트"
@@ -152,17 +156,28 @@ def extract(docs):
     return ok
 
 
-def recent_scores(today):
-    """최근 REPEAT_DAYS 일 안에 실은 키워드 → 그때 급증비."""
-    scores = {}
+def norm(term):
+    return re.sub(r"\s+", "", term).lower()
+
+
+def recent_terms(today, skip_today=False):
+    """최근 REPEAT_DAYS 일 안에 실은 키워드(정규화). skip_today: 오늘 글을 새로 뽑아 교체할 때 오늘 글은 빼고 본다."""
+    terms = set()
     posts = list((BLOG / "_posts").glob("*-trend.md")) + list((BLOG / "_posts").glob("*-meme.md"))  # 구 밈 글 포함
     for p in posts:
-        if (today - date.fromisoformat(p.name[:10])).days <= REPEAT_DAYS:
-            m = re.search(r"^scores: (\{.*\})$", p.read_text(), re.M)
-            if m:
-                for k, v in json.loads(m.group(1)).items():
-                    scores[k] = max(v, scores.get(k, 0))
-    return scores
+        d = date.fromisoformat(p.name[:10])
+        if (skip_today and d == today) or not 0 <= (today - d).days <= REPEAT_DAYS:
+            continue
+        m = re.search(r"^scores: (\{.*\})$", p.read_text(), re.M)
+        if m:
+            terms |= {norm(k) for k in json.loads(m.group(1))}
+    return terms
+
+
+def already_used(term, used):
+    """띄어쓰기·대소문자 무시, 한쪽이 다른 쪽을 포함해도 같은 키워드로 본다('쿠가세' ↔ '쿠팡 쿠가세')."""
+    t = norm(term)
+    return any(t == u or (len(min(t, u, key=len)) >= 2 and (t in u or u in t)) for u in used)
 
 
 def verify(cands, today):
@@ -186,18 +201,23 @@ def verify(cands, today):
     return cands
 
 
-def select(cands, recent):
-    picked, per_cat = [], {}
+def select(cands, used):
+    """반환: (신규 TOP 후보, 여전히 화제). TOP 은 처음 등장한 키워드만, 이미 소개한 건 '여전히 화제'로."""
+    picked, hot, per_cat = [], [], {}
     for c in sorted(cands, key=lambda c: (-c["surge"], -c["blog14"])):
         if c["blog14"] < MIN_BLOG_14D or c["surge"] < MIN_SURGE:
             continue
-        if c["term"] in recent and c["surge"] < recent[c["term"]] * REPEAT_SURGE_FACTOR:
+        if already_used(c["term"], used):
+            if len(hot) < HOT_N and not already_used(c["term"], {norm(x["term"]) for x in hot}):
+                hot.append(c)
+            continue
+        if already_used(c["term"], {norm(x["term"]) for x in picked}):
             continue
         if per_cat.get(c["cat"], 0) >= PER_CATEGORY:
             continue
         picked.append(c)
         per_cat[c["cat"]] = per_cat.get(c["cat"], 0) + 1
-    return picked
+    return picked, hot
 
 
 def gather_sources(c):
@@ -223,10 +243,23 @@ def numbers_ok(text, source):
     return all(n.replace(",", "").rstrip(".") in src for n in NUM.findall(text))
 
 
-def write(picks):
+def write(picks, hot=()):
     body = "\n\n".join(f"[{c['term']}] (수집 분야: {c['cat']})\n" + "\n".join(c["sources"]) for c in picks)
+    if hot:
+        body += "\n\n" + "\n\n".join(f"(여전히 화제) [{c['term']}] (수집 분야: {c['cat']})\n" + "\n".join(c["sources"])
+                                     for c in hot)
     items = parse_json(_llm_claude.call(body, system=WRITE_SYSTEM, model=MODEL, timeout=300))["items"]
     by_term = {i.get("term"): i for i in items}
+    hot_out = []
+    for h in hot:
+        it = by_term.get(h["term"], {})
+        cat, head, why = it.get("category", "").strip(), it.get("headline", "").strip(), it.get("why", "").strip()
+        src = " ".join(h["sources"])
+        if cat in CATEGORIES and head and why and len(head) <= 40 and len(why) <= 50 and not any(
+                BANNED.search(x) or SENSITIVE.search(x) or not numbers_ok(x, src) for x in (head, why)):
+            hot_out.append({**h, "cat": cat, "emoji": (it.get("emoji") or "🔥").strip()[:2], "headline": head, "why": why})
+        else:
+            log(f"여전히 화제 작성 탈락: {h['term']}")
     out = []
     for p in picks:
         it = by_term.get(p["term"], {})
@@ -253,7 +286,7 @@ def write(picks):
             scene = ""                                   # 키워드(고유명사)가 들어간 장면은 쓰지 않는다
         out.append({**p, "cat": cat, "emoji": (it.get("emoji") or "✨").strip()[:2],
                     "headline": head, "facts": facts, "why": why, "scene": scene})
-    return out
+    return out, hot_out
 
 
 CODEX = str(Path.home() / ".local" / "bin" / "codex")
@@ -312,6 +345,10 @@ h1 em{font-style:normal;color:#d1495b}
 .meta .surge{margin-left:auto}
 .term{font-size:38px;font-weight:900}
 .head{font-size:25px;color:#4a453e;margin-top:4px}
+.hot{background:#fff;border:2px dashed #e8c9a8;border-radius:24px;padding:20px 30px;margin-top:8px}
+.hot h3{margin:0 0 10px;font-size:26px;color:#b4541a}
+.hot .h{display:flex;gap:14px;align-items:baseline;font-size:24px;padding:6px 0;color:#4a453e}
+.hot .h b{color:#1f1d1a;font-size:26px;white-space:nowrap}
 """
 
 DETAIL_CSS = BASE_CSS + """
@@ -357,8 +394,10 @@ def page(css, inner):
             f'<body><div class="wrap">{inner}</div></body></html>')
 
 
-def render_cover(items, today, png_path):
+def render_cover(items, today, png_path, hot=()):
     esc = html.escape
+    hot_html = ("" if not hot else '<div class="hot"><h3>🔥 여전히 화제</h3>' + "".join(
+        f'<div class="h"><b>{esc(h["emoji"])} {esc(h["term"])}</b><span>{esc(h["why"])}</span></div>' for h in hot) + "</div>")
     rows = "".join(
         f'<div class="row"><div class="rank">{i}</div><div class="emo">{esc(c["emoji"])}</div><div class="body">'
         f'<div class="meta"><span class="chip" style="background:{CATEGORIES[c["cat"]][0]}">{esc(c["cat"])}</span>'
@@ -369,7 +408,7 @@ def render_cover(items, today, png_path):
     shoot(page(COVER_CSS,
                f'<div class="top">Dbro / 오늘의 트렌드<span>{today:%Y-%m-%d}</span></div>'
                f'<h1>지금 <em>뜨는 것</em> TOP {len(items)}</h1>'
-               f'<div class="sub">분야 상관없이 네이버 검색이 가장 크게 늘어난 순 · {basis:%m/%d} 검색 기준</div>{rows}'
+               f'<div class="sub">새로 뜨는 것만 · 네이버 검색이 가장 크게 늘어난 순 · {basis:%m/%d} 검색 기준</div>{rows}{hot_html}'
                f'<div class="foot">검색 ×N = 최근 3일 네이버 검색량 ÷ 직전 2주 평균 (네이버 검색어 트렌드 상대값)<br>'
                f'항목별 자세한 설명은 다음 카드에 있습니다.</div>'), png_path)
 
@@ -406,21 +445,24 @@ def main():
     ap.add_argument("--kind", default="trend", choices=["trend"])   # blog_approval 호환
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rewrite", action="store_true", help="이미 있는 글을 같은 키워드로 다시 작성(형식 개편용)")
+    ap.add_argument("--replace", action="store_true", help="이미 있는 오늘 글을 키워드부터 새로 뽑아 교체")
     a = ap.parse_args()
     today = date.fromisoformat(a.date)
 
     post = BLOG / "_posts" / f"{a.date}-trend.md"
-    if post.exists() and not a.rewrite:
+    if post.exists() and not (a.rewrite or a.replace):
         log(f"이미 있음: {post.name}")
         return 3
     try:
+        hot = []
         if a.rewrite:
             picks = existing_picks(post)
         else:
             docs = collect(today)
             log(f"수집 {len(docs)}건 ({', '.join(f'{k} {sum(d["cat"] == k for d in docs)}' for k in CATEGORIES)})")
             cands = verify(extract(docs), today)
-            picks = select(cands, recent_scores(today))
+            picks, hot = select(cands, recent_terms(today, skip_today=a.replace))
+            log(f"여전히 화제: {', '.join(h['term'] for h in hot) or '없음'}")
             for c in sorted(cands, key=lambda c: -c["surge"]):
                 log(f"  {'선정' if c in picks else '    '} [{c['cat']}] {c['term']}: ×{c['surge']} · 블로그14일 {c['blog14']}")
         if a.dry_run:
@@ -429,11 +471,13 @@ def main():
             log(f"선정 {len(picks)}개 < {MIN_N} — 발행 생략")
             return 2
         picks = [gather_sources(c) for c in picks[:TOP_N + 2]]
+        hot = [gather_sources(c) for c in hot]
     except Exception as exc:
         log(f"수집·검증 실패: {type(exc).__name__}: {exc}")
         return 1
     try:
-        items = write(picks)[:TOP_N]
+        items, hot = write(picks, hot)
+        items = items[:TOP_N]
     except Exception as exc:
         log(f"작성 실패: {type(exc).__name__}: {exc}")
         return 1
@@ -444,7 +488,7 @@ def main():
     cards = BLOG / "assets" / "cards"
     cards.mkdir(parents=True, exist_ok=True)
     cover = cards / f"{a.date}_trend.png"            # 텔레그램 알림·글 첫 이미지
-    render_cover(items, today, cover)
+    render_cover(items, today, cover, hot)
     for old in cards.glob(f"{a.date}_trend_*.png"):   # --rewrite 때 이전 상세 카드 정리
         old.unlink()
     url = lambda name: f"{{{{ '/assets/cards/{name}' | relative_url }}}}"
@@ -453,7 +497,7 @@ def main():
         img = cards / f"{a.date}_trend_{i}.png"
         with tempfile.TemporaryDirectory() as d:
             photo = Path(d) / "photo.jpg"
-            has_photo = generate_photo(c["scene"], photo)
+            has_photo = generate_photo(c["scene"], photo) or generate_photo(c["scene"], photo)   # 실패 시 1회 재시도
             log(f"  사진 {'생성' if has_photo else '없음'}: {c['term']} ({c['scene'][:30]})")
             render_detail(c, i, today, img, photo if has_photo else None)
         facts = "\n".join(f"- **{f['label']}** {f['text']}" for f in c["facts"])
@@ -461,6 +505,10 @@ def main():
                         f"*{c['cat']} · {surge_label(c['surge'])}*\n\n"
                         f"**{c['headline']}**\n\n{facts}\n\n> 왜 뜨나: {c['why']}\n\n"
                         f"![{c['term']} 설명 카드]({url(img.name)})")
+    if hot:
+        sections.append("## 🔥 여전히 화제\n\n이미 소개했지만 오늘도 검색이 크게 늘어난 키워드입니다.\n\n" +
+                        "\n".join(f"- **{h['emoji']} {h['term']}** ({h['cat']}, {surge_label(h['surge'])}) — "
+                                   f"{h['headline']}. {h['why']}" for h in hot))
     names = " · ".join(c["term"] for c in items[:3])
     scores = json.dumps({c["term"]: c["surge"] for c in items}, ensure_ascii=False)
     picks_fm = json.dumps([[c["term"], c["cat"]] for c in items], ensure_ascii=False)
