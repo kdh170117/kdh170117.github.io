@@ -28,6 +28,7 @@ import html
 import json
 import re
 import subprocess
+import tempfile
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -85,11 +86,14 @@ WRITE_SYSTEM = """너는 트렌드 해설 카드 작가다. 입력은 키워드�
 - facts: 핵심 정보 2~4개. label 은 무엇/언제/어디/얼마/누가/특징 중 하나, text 는 40자 이내.
   입력에 있는 사실만. 날짜·가격·수량·인원 등 숫자는 입력에 그대로 있는 것만 쓴다. 모르면 그 항목을 빼라.
 - why: 왜 지금 뜨는지, 40자 이내.
+- scene: 대표 이미지로 쓸 '일반적인 장면' 묘사, 한국어 60자 이내. 실존 인물·아이돌·브랜드·로고·실제 상품명·글자 금지.
+  예) 할인 행사 → "밝은 매장에 냉장고·TV·노트북이 진열된 장면", 아이돌 신곡 → "보라색 조명이 비치는 빈 콘서트 무대",
+      디저트 → "나무 쟁반 위 알록달록한 찹쌀떡 클로즈업", 게임 → "판타지 마을 풍경 일러스트"
 규칙: 논란·루머·사생활·사건사고·부고는 언급하지 않는다. 광고 문구처럼 쓰지 않는다. 담백하고 정보 위주.
 - 참여 업체 한 곳의 정보(그 브랜드의 할인 기간·가격)를 행사·제품 전체의 정보처럼 쓰지 않는다.
   여러 글에 공통으로 나오는 사실을 우선하고, 글마다 다르면 그 항목은 뺀다.
 출력은 JSON 하나만:
-{"items":[{"term":"","category":"","emoji":"","headline":"","facts":[{"label":"","text":""}],"why":""}]}"""
+{"items":[{"term":"","category":"","emoji":"","headline":"","facts":[{"label":"","text":""}],"why":"","scene":""}]}"""
 
 
 def log(msg):
@@ -244,9 +248,42 @@ def write(picks):
                 or any(BANNED.search(x) or SENSITIVE.search(x) or not numbers_ok(x, src) for x in checks):
             log(f"작성 검사 탈락: {p['term']} ({head[:20]!r} / {why[:20]!r} / facts {len(facts)})")
             continue
+        scene = (it.get("scene") or "").strip()
+        if len(scene) > 80 or BANNED.search(scene) or SENSITIVE.search(scene) or p["term"] in scene:
+            scene = ""                                   # 키워드(고유명사)가 들어간 장면은 쓰지 않는다
         out.append({**p, "cat": cat, "emoji": (it.get("emoji") or "✨").strip()[:2],
-                    "headline": head, "facts": facts, "why": why})
+                    "headline": head, "facts": facts, "why": why, "scene": scene})
     return out
+
+
+CODEX = str(Path.home() / ".local" / "bin" / "codex")
+# 금지 조건은 LLM 이 쓴 장면 설명에 맡기지 않고 코드가 항상 붙인다(공개 글 — 초상권·상표·오해 방지).
+IMAGE_RULES = ("사진 같은 스타일, 가로 3:2, 따뜻하고 깔끔한 분위기. 사람 얼굴, 실존 인물, 글자, 간판 문구, "
+               "브랜드 로고, 특정 회사 제품 디자인은 절대 넣지 마.")
+
+
+def generate_photo(scene, out_jpg):
+    """Codex(ChatGPT 로그인) 이미지 생성 → 1080px JPEG. 실패하면 False(카드는 사진 없이 만든다)."""
+    if not scene:
+        return False
+    with tempfile.TemporaryDirectory(prefix="trend-img-") as d:
+        prompt = (f"이미지 생성 도구로 이미지를 정확히 1장 만들어 현재 폴더에 out.png 로 저장해. 다른 작업은 하지 마. "
+                  f"장면: {scene}. {IMAGE_RULES} 저장 후 파일 경로만 출력해.")
+        try:
+            subprocess.run([CODEX, "exec", "--skip-git-repo-check", "--ephemeral", "-C", d,
+                            "--sandbox", "workspace-write", prompt],
+                           capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            log(f"이미지 생성 시간 초과: {scene[:30]}")
+            return False
+        src = Path(d) / "out.png"
+        if not src.is_file():
+            log(f"이미지 생성 실패: {scene[:30]}")
+            return False
+        im = Image.open(src).convert("RGB")
+        im = im.resize((1080, round(im.height * 1080 / im.width)))
+        im.save(out_jpg, "JPEG", quality=85)
+    return True
 
 
 def surge_label(s):
@@ -278,6 +315,10 @@ h1 em{font-style:normal;color:#d1495b}
 """
 
 DETAIL_CSS = BASE_CSS + """
+.photo{position:relative;margin:26px 0 0;border-radius:32px;overflow:hidden}
+.photo img{display:block;width:100%}
+.photo span{position:absolute;right:16px;bottom:14px;background:rgba(0,0,0,.45);color:#fff;font-size:18px;
+  border-radius:999px;padding:4px 12px}
 .hero{border-radius:32px;padding:44px 48px;color:#fff;margin:26px 0 26px;position:relative;overflow:hidden}
 .hero .emo{position:absolute;right:40px;top:30px;font-size:150px;opacity:.95}
 .hero .rank{font-size:30px;font-weight:900;opacity:.85}
@@ -333,12 +374,14 @@ def render_cover(items, today, png_path):
                f'항목별 자세한 설명은 다음 카드에 있습니다.</div>'), png_path)
 
 
-def render_detail(c, rank, today, png_path):
+def render_detail(c, rank, today, png_path, photo=None):
     esc = html.escape
     color = CATEGORIES[c["cat"]][0]
+    photo_html = (f'<div class="photo"><img src="{photo.as_uri()}"><span>AI 생성 이미지</span></div>'
+                  if photo and photo.is_file() else "")
     facts = "".join(f'<div class="fact"><b>{esc(f["label"])}</b><span>{esc(f["text"])}</span></div>' for f in c["facts"])
     shoot(page(DETAIL_CSS,
-               f'<div class="top">Dbro / 오늘의 트렌드<span>{today:%Y-%m-%d}</span></div>'
+               f'<div class="top">Dbro / 오늘의 트렌드<span>{today:%Y-%m-%d}</span></div>{photo_html}'
                f'<div class="hero" style="background:{color}"><div class="emo">{esc(c["emoji"])}</div>'
                f'<div class="rank">TOP {rank}</div><div class="term">{esc(c["term"])}</div>'
                f'<span class="chip">{esc(c["cat"])}</span><span class="surge">{surge_label(c["surge"])}</span></div>'
@@ -408,7 +451,11 @@ def main():
     sections = []
     for i, c in enumerate(items, 1):
         img = cards / f"{a.date}_trend_{i}.png"
-        render_detail(c, i, today, img)
+        with tempfile.TemporaryDirectory() as d:
+            photo = Path(d) / "photo.jpg"
+            has_photo = generate_photo(c["scene"], photo)
+            log(f"  사진 {'생성' if has_photo else '없음'}: {c['term']} ({c['scene'][:30]})")
+            render_detail(c, i, today, img, photo if has_photo else None)
         facts = "\n".join(f"- **{f['label']}** {f['text']}" for f in c["facts"])
         sections.append(f"## {i}. {c['emoji']} {c['term']}\n\n"
                         f"*{c['cat']} · {surge_label(c['surge'])}*\n\n"

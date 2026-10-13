@@ -116,7 +116,7 @@ def cmd_prepare(date, kind):
     script = ("publish_board.py" if kind in BOARD_KINDS else
               "publish_trend.py" if kind in TREND_KINDS else "publish_market.py")
     r = subprocess.run([PYTHON, str(BLOG / script), "--date", date, "--kind", kind],
-                       capture_output=True, text=True, timeout=900)
+                       capture_output=True, text=True, timeout=1800)   # 트렌드는 이미지 생성(장당 ~2분) 포함
     if r.returncode == 2:
         log(f"[prepare] {pid} 원본 없음(휴장·새 데이터 없음) — 생략")
         return 2
@@ -163,21 +163,31 @@ def cmd_prepare(date, kind):
 
 
 def discard(item):
-    for rel in (item["post"], item["img"]):
+    for rel in item_files(item):
         (BLOG / rel).unlink(missing_ok=True)
+
+
+def item_files(item):
+    """글 + 그 글의 이미지 전부(트렌드는 표지 외에 상세 카드 _1·_2·_3 이 있다)."""
+    stem = Path(item["img"]).stem                     # 예: 2026-10-13_trend
+    imgs = sorted(str(p.relative_to(BLOG)) for p in (BLOG / "assets" / "cards").glob(f"{stem}*")
+                  if p.stem == stem or p.stem.startswith(stem + "_"))
+    return [item["post"]] + (imgs or [item["img"]])
 
 
 def publish(item):
     """멱등: 이미 커밋된 항목을 다시 받아도(재시도) 실패하지 않고 푸시만 다시 한다."""
-    git("add", item["post"], item["img"])
-    if git("status", "--porcelain", "--", item["post"], item["img"]).strip():
+    files = item_files(item)
+    git("add", "--", *files)
+    if git("status", "--porcelain", "--", *files).strip():
         git("commit", "-qm", f"브리핑 발행: {item['title']}")
     git("push", "-q")
 
 
 def unpublish(item):
     """발행된 글 내리기(사이트에서 제거). 멱등: 이미 내려간 파일이면 푸시만 다시 한다."""
-    tracked = git("ls-files", "--", item["post"], item["img"]).split()
+    stem = Path(item["img"]).stem
+    tracked = git("ls-files", "--", item["post"], f"assets/cards/{stem}.*", f"assets/cards/{stem}_*").split()
     if tracked:
         git("rm", "-q", "--", *tracked)
         git("commit", "-qm", f"글 내림: {item['title']}")
