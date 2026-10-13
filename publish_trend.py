@@ -89,15 +89,19 @@ WRITE_SYSTEM = """너는 트렌드 해설 카드 작가다. 입력은 키워드�
   입력에 있는 사실만. 날짜·가격·수량·인원 등 숫자는 입력에 그대로 있는 것만 쓴다. 모르면 그 항목을 빼라.
 - why: 왜 지금 뜨는지, 40자 이내.
 - 키워드 머리에 (여전히 화제) 표시가 있으면 이미 소개했던 것이다: headline 과 why(=지금 근황, 새로 바뀐 점 위주)만 쓰고
-  facts 는 빈 배열, scene 은 빈 문자열로 둔다.
-- scene: 대표 이미지로 쓸 '일반적인 장면' 묘사, 한국어 60자 이내. 실존 인물·아이돌·브랜드·로고·실제 상품명·글자 금지.
+  facts 는 빈 배열, scene 은 빈 문자열로 둔다. '연장·변경·추가·재개' 같은 변화는 입력에 그 말이 있을 때만 쓰고,
+  없으면 현재 진행 상황만 쓴다. headline·why 앞에 '여전히 화제' 같은 머리말을 붙이지 않는다.
+- style: 사람(연예인·유튜버·인플루언서)이 중심인 키워드면 "character", 상품·음식·장소·행사면 "photo".
+- scene: 대표 이미지 묘사, 한국어 60자 이내. 실존 인물·아이돌·브랜드·로고·실제 상품명·글자 금지.
+  style 이 character 면 그 이슈의 분위기를 표현한 '오리지널 귀여운 마스코트 캐릭터'가 무엇을 하는 장면으로 쓴다
+  (실존 인물의 외모·헤어·의상 특징을 묘사하지 않는다). 예) "브이로그 카메라를 든 귀여운 고양이 캐릭터"
   예) 할인 행사 → "밝은 매장에 냉장고·TV·노트북이 진열된 장면", 아이돌 신곡 → "보라색 조명이 비치는 빈 콘서트 무대",
       디저트 → "나무 쟁반 위 알록달록한 찹쌀떡 클로즈업", 게임 → "판타지 마을 풍경 일러스트"
 규칙: 논란·루머·사생활·사건사고·부고는 언급하지 않는다. 광고 문구처럼 쓰지 않는다. 담백하고 정보 위주.
 - 참여 업체 한 곳의 정보(그 브랜드의 할인 기간·가격)를 행사·제품 전체의 정보처럼 쓰지 않는다.
   여러 글에 공통으로 나오는 사실을 우선하고, 글마다 다르면 그 항목은 뺀다.
 출력은 JSON 하나만:
-{"items":[{"term":"","category":"","emoji":"","headline":"","facts":[{"label":"","text":""}],"why":"","scene":""}]}"""
+{"items":[{"term":"","category":"","emoji":"","headline":"","facts":[{"label":"","text":""}],"why":"","style":"","scene":""}]}"""
 
 
 def log(msg):
@@ -243,26 +247,38 @@ def numbers_ok(text, source):
     return all(n.replace(",", "").rstrip(".") in src for n in NUM.findall(text))
 
 
-def write(picks, hot=()):
-    body = "\n\n".join(f"[{c['term']}] (수집 분야: {c['cat']})\n" + "\n".join(c["sources"]) for c in picks)
-    if hot:
-        body += "\n\n" + "\n\n".join(f"(여전히 화제) [{c['term']}] (수집 분야: {c['cat']})\n" + "\n".join(c["sources"])
-                                     for c in hot)
+def key(term):
+    """응답의 키워드 표기 차이(괄호·표시 문구·띄어쓰기·대소문자)를 무시하고 맞춘다."""
+    return norm(re.sub(r"\(여전히 화제\)|[\[\]()]", "", term or ""))
+
+
+def ask(entries, hot_mark=False):
+    if not entries:
+        return {}
+    mark = "(여전히 화제) " if hot_mark else ""
+    body = "\n\n".join(f"{mark}[{c['term']}] (수집 분야: {c['cat']})\n" + "\n".join(c["sources"]) for c in entries)
     items = parse_json(_llm_claude.call(body, system=WRITE_SYSTEM, model=MODEL, timeout=300))["items"]
-    by_term = {i.get("term"): i for i in items}
+    return {key(i.get("term")): i for i in items}
+
+
+def write(picks, hot=()):
+    # TOP 과 '여전히 화제'를 한 요청에 섞으면 응답 표기가 어긋나 매칭이 실패했다(2026-10-13) → 따로 요청한다.
+    by_term = ask(picks)
+    hot_by = ask(list(hot), hot_mark=True)
     hot_out = []
     for h in hot:
-        it = by_term.get(h["term"], {})
+        it = hot_by.get(key(h["term"]), {})
         cat, head, why = it.get("category", "").strip(), it.get("headline", "").strip(), it.get("why", "").strip()
+        head, why = (re.sub(r"^\s*(🔥\s*)?여전히 화제\s*[:：·-]?\s*", "", x) for x in (head, why))
         src = " ".join(h["sources"])
         if cat in CATEGORIES and head and why and len(head) <= 40 and len(why) <= 50 and not any(
                 BANNED.search(x) or SENSITIVE.search(x) or not numbers_ok(x, src) for x in (head, why)):
             hot_out.append({**h, "cat": cat, "emoji": (it.get("emoji") or "🔥").strip()[:2], "headline": head, "why": why})
         else:
-            log(f"여전히 화제 작성 탈락: {h['term']}")
+            log(f"여전히 화제 작성 탈락: {h['term']} (응답 {'있음' if it else '없음'}, 분야 {cat!r}, {head[:20]!r} / {why[:20]!r})")
     out = []
     for p in picks:
-        it = by_term.get(p["term"], {})
+        it = by_term.get(key(p["term"]), {})
         cat, head, why = it.get("category", "").strip(), it.get("headline", "").strip(), it.get("why", "").strip()
         src = " ".join(p["sources"])
         if cat not in CATEGORIES:
@@ -285,33 +301,40 @@ def write(picks, hot=()):
         if len(scene) > 80 or BANNED.search(scene) or SENSITIVE.search(scene) or p["term"] in scene:
             scene = ""                                   # 키워드(고유명사)가 들어간 장면은 쓰지 않는다
         out.append({**p, "cat": cat, "emoji": (it.get("emoji") or "✨").strip()[:2],
-                    "headline": head, "facts": facts, "why": why, "scene": scene})
+                    "headline": head, "facts": facts, "why": why, "scene": scene,
+                    "style": "character" if it.get("style") == "character" or cat == "아이돌·연예" else "photo"})
     return out, hot_out
 
 
 CODEX = str(Path.home() / ".local" / "bin" / "codex")
 # 금지 조건은 LLM 이 쓴 장면 설명에 맡기지 않고 코드가 항상 붙인다(공개 글 — 초상권·상표·오해 방지).
-IMAGE_RULES = ("사진 같은 스타일, 가로 3:2, 따뜻하고 깔끔한 분위기. 사람 얼굴, 실존 인물, 글자, 간판 문구, "
-               "브랜드 로고, 특정 회사 제품 디자인은 절대 넣지 마.")
+IMAGE_RULES = {
+    "photo": ("사진 같은 스타일, 가로 3:2, 따뜻하고 깔끔한 분위기. 사람 얼굴, 실존 인물, 글자, 간판 문구, "
+              "브랜드 로고, 특정 회사 제품 디자인은 절대 넣지 마."),
+    # 연예·인물 키워드: 실존 인물 캐리커처 금지(초상권·퍼블리시티권). 닮지 않은 오리지널 마스코트만.
+    "character": ("귀엽고 밝은 3D 캐릭터 일러스트 스타일, 가로 3:2. 오리지널 마스코트 캐릭터(동물 또는 상상 속 캐릭터)만 그려. "
+                  "실존 인물·연예인·아이돌을 닮게 그리지 말고, 사람 얼굴, 글자, 로고, 실제 상품 디자인은 절대 넣지 마."),
+}
 
 
-def generate_photo(scene, out_jpg):
+def generate_photo(scene, out_jpg, style="photo"):
     """Codex(ChatGPT 로그인) 이미지 생성 → 1080px JPEG. 실패하면 False(카드는 사진 없이 만든다)."""
     if not scene:
         return False
     with tempfile.TemporaryDirectory(prefix="trend-img-") as d:
         prompt = (f"이미지 생성 도구로 이미지를 정확히 1장 만들어 현재 폴더에 out.png 로 저장해. 다른 작업은 하지 마. "
-                  f"장면: {scene}. {IMAGE_RULES} 저장 후 파일 경로만 출력해.")
+                  f"장면: {scene}. {IMAGE_RULES[style]} 저장 후 파일 경로만 출력해.")
         try:
-            subprocess.run([CODEX, "exec", "--skip-git-repo-check", "--ephemeral", "-C", d,
-                            "--sandbox", "workspace-write", prompt],
-                           capture_output=True, text=True, timeout=300)
+            r = subprocess.run([CODEX, "exec", "--skip-git-repo-check", "--ephemeral", "-C", d,
+                                "--sandbox", "workspace-write", prompt],
+                               capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:
             log(f"이미지 생성 시간 초과: {scene[:30]}")
             return False
         src = Path(d) / "out.png"
         if not src.is_file():
-            log(f"이미지 생성 실패: {scene[:30]}")
+            tail = " | ".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-4:])[:400]
+            log(f"이미지 생성 실패(rc={r.returncode}): {scene[:30]} — {tail}")
             return False
         im = Image.open(src).convert("RGB")
         im = im.resize((1080, round(im.height * 1080 / im.width)))
@@ -416,7 +439,7 @@ def render_cover(items, today, png_path, hot=()):
 def render_detail(c, rank, today, png_path, photo=None):
     esc = html.escape
     color = CATEGORIES[c["cat"]][0]
-    photo_html = (f'<div class="photo"><img src="{photo.as_uri()}"><span>AI 생성 이미지</span></div>'
+    photo_html = (f'<div class="photo"><img src="{photo.as_uri()}"><span>AI 생성 이미지{" · 실존 인물과 무관" if c.get("style") == "character" else ""}</span></div>'
                   if photo and photo.is_file() else "")
     facts = "".join(f'<div class="fact"><b>{esc(f["label"])}</b><span>{esc(f["text"])}</span></div>' for f in c["facts"])
     shoot(page(DETAIL_CSS,
@@ -439,6 +462,19 @@ def existing_picks(post):
     return [{"term": t, "cat": cats.get(t, "소비·생활"), "surge": s, "blog14": 0} for t, s in scores.items()]
 
 
+def existing_hot(post):
+    """--rewrite: '여전히 화제' 목록 복원. front matter hot → 없으면 본문 목록(구 형식)에서."""
+    text = post.read_text()
+    m = re.search(r"^hot: (\[.*\])$", text, re.M)
+    if m:
+        return [{"term": t, "cat": c, "surge": sv, "blog14": 0} for t, c, sv in json.loads(m.group(1))]
+    out = []
+    for term, cat, label in re.findall(r"^- \*\*\S+ (.+?)\*\* \((.+?), (.+?)\) — ", text, re.M):
+        n = re.search(r"×([\d.]+)", label)
+        out.append({"term": term, "cat": cat, "surge": float(n.group(1)) if n else 99.0, "blog14": 0})
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=date.today().isoformat())
@@ -457,6 +493,7 @@ def main():
         hot = []
         if a.rewrite:
             picks = existing_picks(post)
+            hot = existing_hot(post)
         else:
             docs = collect(today)
             log(f"수집 {len(docs)}건 ({', '.join(f'{k} {sum(d["cat"] == k for d in docs)}' for k in CATEGORIES)})")
@@ -476,8 +513,16 @@ def main():
         log(f"수집·검증 실패: {type(exc).__name__}: {exc}")
         return 1
     try:
+        hot_selected = [[h["term"], h["cat"], h["surge"]] for h in hot]   # 작성 실패해도 다음 --rewrite 가 복원할 수 있게
         items, hot = write(picks, hot)
-        items = items[:TOP_N]
+        done = {c["term"] for c in items}
+        missing = [c for c in picks if c["term"] not in done]
+        if len(items) < TOP_N and missing:              # 검사 탈락분만 1회 다시 작성(표현 하나로 하루치가 빠지지 않게)
+            log(f"작성 재시도: {', '.join(c['term'] for c in missing)}")
+            retry, _ = write(missing)
+            items += retry
+        order = {c["term"]: k for k, c in enumerate(picks)}
+        items = sorted(items, key=lambda c: order[c["term"]])[:TOP_N]
     except Exception as exc:
         log(f"작성 실패: {type(exc).__name__}: {exc}")
         return 1
@@ -497,7 +542,8 @@ def main():
         img = cards / f"{a.date}_trend_{i}.png"
         with tempfile.TemporaryDirectory() as d:
             photo = Path(d) / "photo.jpg"
-            has_photo = generate_photo(c["scene"], photo) or generate_photo(c["scene"], photo)   # 실패 시 1회 재시도
+            style = c.get("style", "photo")
+            has_photo = generate_photo(c["scene"], photo, style) or generate_photo(c["scene"], photo, style)   # 실패 시 1회 재시도
             log(f"  사진 {'생성' if has_photo else '없음'}: {c['term']} ({c['scene'][:30]})")
             render_detail(c, i, today, img, photo if has_photo else None)
         facts = "\n".join(f"- **{f['label']}** {f['text']}" for f in c["facts"])
@@ -525,6 +571,7 @@ def main():
         f'description: "{desc}"\n'
         f"scores: {scores}\n"
         f"picks: {picks_fm}\n"
+        f"hot: {json.dumps(hot_selected, ensure_ascii=False)}\n"
         "---\n"
         f"![{a.date} 오늘의 트렌드 TOP {len(items)}]({url(cover.name)})\n\n"
         + "\n\n".join(sections) +
